@@ -2357,15 +2357,15 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
     //pthread_main_np()判断是否是初始线程 是初始线程返回1 不是返回0 When a process is created, one thread is automatically created. This thread is called the initial thread.
     //TSD(Thread-Specific Data) 表示线程私有数据。在 C++ 中，全局变量可以被所有线程访问，局部变量只有函数内部可以访问。而 TSD 的作用就是能够在同一个线程的不同函数中被访问。在不同线程中，虽然名字相同，但是获取到的数据随线程不同而不同。
     
-    //分发队列是安全的 (没有正在处理的loopmodel 或者没有__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__)
+    //分发队列是安全的 (没有previousMode 或者没有__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__)
     Boolean libdispatchQSafe = pthread_main_np() && ((HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && NULL == previousMode) || (!HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && 0 == _CFGetTSD(__CFTSDKeyIsInGCDMainQ)));
     //分发队列是安全的 并且是 Main RunLoop 且 commonModes包含当前的model 给dispatchPort 赋值为主线程收发消息的端口
     if (libdispatchQSafe && (CFRunLoopGetMain() == rl) && CFSetContainsValue(rl->_commonModes, rlm->_name)) dispatchPort = _dispatch_get_main_queue_port_4CF();
     
-#if USE_DISPATCH_SOURCE_FOR_TIMERS //如果是MacOS
+#if USE_DISPATCH_SOURCE_FOR_TIMERS
     mach_port_name_t modeQueuePort = MACH_PORT_NULL;
     if (rlm->_queue) {
-        modeQueuePort = _dispatch_runloop_root_queue_get_port_4CF(rlm->_queue);
+        modeQueuePort = _dispatch_runloop_root_queue_get_port_4CF(rlm->_queue);//runloopMode的队列端口
         if (!modeQueuePort) {
             CRASH("Unable to get port for run loop mode queue (%d)", -1);
         }
@@ -2431,12 +2431,11 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         // 如果有 Sources0 事件处理 或者 超时，poll 都为 true
         Boolean poll = sourceHandledThisLoop || (0ULL == timeout_context->termTSR);
         // 第一次do..whil循环不会走该分支，因为 didDispatchPortLastTime 初始化是 true
-        if (MACH_PORT_NULL != dispatchPort && !didDispatchPortLastTime) {//优先系统消息
+        if (MACH_PORT_NULL != dispatchPort && !didDispatchPortLastTime) {//优先分发消息
 #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-            // 从缓冲区读取消息
             msg = (mach_msg_header_t *)msg_buffer;
-            // 接收 dispatchPort 端口的消息 dispatchPort 是消息分发接口 监听系统内核消息
-            if (__CFRunLoopServiceMachPort(dispatchPort, &msg, sizeof(msg_buffer), &livePort, 0, &voucherState, NULL)) {//如果接收消息成功（有待分发消息）
+            // 接收 dispatchPort 端口的消息 dispatchPort 是消息分发接口
+            if (__CFRunLoopServiceMachPort(dispatchPort, &msg, sizeof(msg_buffer), &livePort, 0, &voucherState, NULL)) {//如果接收消息成功
                 goto handle_msg;
             }
 #elif DEPLOYMENT_TARGET_WINDOWS
@@ -2464,7 +2463,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         CFAbsoluteTime sleepStart = poll ? 0.0 : CFAbsoluteTimeGetCurrent();
 
 #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-#if USE_DISPATCH_SOURCE_FOR_TIMERS
+    #if USE_DISPATCH_SOURCE_FOR_TIMERS
         do {
             if (kCFUseCollectableAllocator) {
                 // objc_clear_stack(0);
@@ -2477,7 +2476,8 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             
             if (modeQueuePort != MACH_PORT_NULL && livePort == modeQueuePort) {
                 // Drain the internal queue. If one of the callout blocks sets the timerFired flag, break out and service the timer.
-                while (_dispatch_runloop_root_queue_perform_4CF(rlm->_queue));
+                while (_dispatch_runloop_root_queue_perform_4CF(rlm->_queue));//倾倒队列
+                //如果触发了timer事件会设置timerFired
                 if (rlm->_timerFired) {
                     // Leave livePort as the queue port, and service timers below
                     rlm->_timerFired = false;
@@ -2490,7 +2490,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
                 break;
             }
         } while (1);
-#else
+    #else
         if (kCFUseCollectableAllocator) {
             // objc_clear_stack(0);
             // <rdar://problem/16393959>
@@ -2498,13 +2498,14 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         }
         msg = (mach_msg_header_t *)msg_buffer;
         __CFRunLoopServiceMachPort(waitSet, &msg, sizeof(msg_buffer), &livePort, poll ? 0 : TIMEOUT_INFINITY, &voucherState, &voucherCopy);
-#endif
+    #endif
         
         
 #elif DEPLOYMENT_TARGET_WINDOWS
         // Here, use the app-supplied message queue mask. They will set this if they are interested in having this run loop receive windows messages.
         __CFRunLoopWaitForMultipleObjects(waitSet, NULL, poll ? 0 : TIMEOUT_INFINITY, rlm->_msgQMask, &livePort, &windowsMessageReceived);
 #endif
+        
         //只有接收到消息后 才能走到这里
         __CFRunLoopLock(rl);
         __CFRunLoopModeLock(rlm);
@@ -2564,7 +2565,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         
         
 #endif
-        if (MACH_PORT_NULL == livePort) {//活跃端口为空
+        if (MACH_PORT_NULL == livePort) {//没有活跃端口
             CFRUNLOOP_WAKEUP_FOR_NOTHING();
             // handle nothing
         } else if (livePort == rl->_wakeUpPort) {//唤醒端口
@@ -2576,7 +2577,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 #endif
         }
 #if USE_DISPATCH_SOURCE_FOR_TIMERS
-        else if (modeQueuePort != MACH_PORT_NULL && livePort == modeQueuePort) {
+        else if (modeQueuePort != MACH_PORT_NULL && livePort == modeQueuePort) {//timer类型之一
             CFRUNLOOP_WAKEUP_FOR_TIMER();
             if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {
                 // Re-arm the next timer, because we apparently fired early
@@ -2585,7 +2586,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         }
 #endif
 #if USE_MK_TIMER_TOO
-        else if (rlm->_timerPort != MACH_PORT_NULL && livePort == rlm->_timerPort) {
+        else if (rlm->_timerPort != MACH_PORT_NULL && livePort == rlm->_timerPort) {//timer类型之一
             CFRUNLOOP_WAKEUP_FOR_TIMER();
             // On Windows, we have observed an issue where the timer port is set before the time which we requested it to be set. For example, we set the fire time to be TSR 167646765860, but it is actually observed firing at TSR 167646764145, which is 1715 ticks early. The result is that, when __CFRunLoopDoTimers checks to see if any of the run loop timers should be firing, it appears to be 'too early' for the next timer, and no timers are handled.
             // In this case, the timer port has been automatically reset (since it was returned from MsgWaitForMultipleObjectsEx), and if we do not re-arm it, then no timers will ever be serviced again unless something adjusts the timer list (e.g. adding or removing timers). The fix for the issue is to reset the timer here if CFRunLoopDoTimers did not handle a timer itself. 9308754
@@ -2595,7 +2596,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             }
         }
 #endif
-        else if (livePort == dispatchPort) {//如果是系统内核消息端口
+        else if (livePort == dispatchPort) {//如果是分发消息端口
             CFRUNLOOP_WAKEUP_FOR_DISPATCH();
             __CFRunLoopModeUnlock(rlm);
             __CFRunLoopUnlock(rl);
@@ -2603,13 +2604,13 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 #if DEPLOYMENT_TARGET_WINDOWS
             void *msg = 0;
 #endif
-            __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__(msg);
+            __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__(msg);//处理分发消息
             _CFSetTSD(__CFTSDKeyIsInGCDMainQ, (void *)0, NULL);
             __CFRunLoopLock(rl);
             __CFRunLoopModeLock(rlm);
             sourceHandledThisLoop = true;
             didDispatchPortLastTime = true;
-        } else {
+        } else {//source1唤醒
             CFRUNLOOP_WAKEUP_FOR_SOURCE();
             
             // If we received a voucher from this mach_msg, then put a copy of the new voucher into TSD. CFMachPortBoost will look in the TSD for the voucher. By using the value in the TSD we tie the CFMachPortBoost to this received mach_msg explicitly without a chance for anything in between the two pieces of code to set the voucher again.
@@ -2621,7 +2622,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
 		mach_msg_header_t *reply = NULL;
 		sourceHandledThisLoop = __CFRunLoopDoSource1(rl, rlm, rls, msg, msg->msgh_size, &reply) || sourceHandledThisLoop;
-		if (NULL != reply) {//转发source1消息
+		if (NULL != reply) {//转发source1处理后的消息
 		    (void)mach_msg(reply, MACH_SEND_MSG, reply->msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
 		    CFAllocatorDeallocate(kCFAllocatorSystemDefault, reply);
 		}
