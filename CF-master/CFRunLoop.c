@@ -1971,7 +1971,7 @@ static void __CFArmNextTimerInMode(CFRunLoopModeRef rlm, CFRunLoopRef rl) {
                 
                 // Arm the mk timer
                 if (rlm->_timerPort) {
-                    mk_timer_arm(rlm->_timerPort, __CFUInt64ToAbsoluteTime(nextSoftDeadline));
+                    mk_timer_arm(rlm->_timerPort, __CFUInt64ToAbsoluteTime(nextSoftDeadline));//安排下一次向_timerPort发消息的时间
                     rlm->_mkTimerArmed = true;
                 }
             }
@@ -2048,7 +2048,7 @@ static Boolean __CFRunLoopDoTimer(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFRunLo
         } else {
             context_info = rlt->_context.info;
         }
-        Boolean doInvalidate = (0.0 == rlt->_interval);
+        Boolean doInvalidate = (0.0 == rlt->_interval);//如果不是重复执行的
 	__CFRunLoopTimerSetFiring(rlt);
         // Just in case the next timer has exactly the same deadlines as this one, we reset these values so that the arm next timer code can correctly find the next timer in the list and arm the underlying timer.
         rlm->_timerSoftDeadline = UINT64_MAX;
@@ -2058,7 +2058,7 @@ static Boolean __CFRunLoopDoTimer(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFRunLo
 	oldFireTSR = rlt->_fireTSR;
 	__CFRunLoopTimerFireTSRUnlock();
 
-        __CFArmNextTimerInMode(rlm, rl);//安排下个timer
+        __CFArmNextTimerInMode(rlm, rl);//安排timer下一次唤醒rlm的时间
 
 	__CFRunLoopModeUnlock(rlm);
 	__CFRunLoopUnlock(rl);
@@ -2110,7 +2110,7 @@ static Boolean __CFRunLoopDoTimer(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFRunLo
                 }
                 uint64_t currentTSR = mach_absolute_time();
                 nextFireTSR = oldFireTSR;
-                while (nextFireTSR <= currentTSR) {
+                while (nextFireTSR <= currentTSR) {//在oldFireTSR基础上+ n *intervalTSR 找到下次触发时间
                     nextFireTSR += intervalTSR;
                 }
             }
