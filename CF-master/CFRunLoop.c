@@ -2357,7 +2357,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
     //pthread_main_np()判断是否是初始线程 是初始线程返回1 不是返回0 When a process is created, one thread is automatically created. This thread is called the initial thread.
     //TSD(Thread-Specific Data) 表示线程私有数据。在 C++ 中，全局变量可以被所有线程访问，局部变量只有函数内部可以访问。而 TSD 的作用就是能够在同一个线程的不同函数中被访问。在不同线程中，虽然名字相同，但是获取到的数据随线程不同而不同。
     
-    //分发队列是安全的 (没有previousMode 或者没有__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__)
+    //分发队列是安全的 (没有previousMode 或者没有执行__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__)
     Boolean libdispatchQSafe = pthread_main_np() && ((HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && NULL == previousMode) || (!HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && 0 == _CFGetTSD(__CFTSDKeyIsInGCDMainQ)));
     //分发队列是安全的 并且是 Main RunLoop 且 commonModes包含当前的model 给dispatchPort 赋值为主线程收发消息的端口
     if (libdispatchQSafe && (CFRunLoopGetMain() == rl) && CFSetContainsValue(rl->_commonModes, rlm->_name)) dispatchPort = _dispatch_get_main_queue_port_4CF();
@@ -2396,7 +2396,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         timeout_context->termTSR = UINT64_MAX;
     }
 
-    Boolean didDispatchPortLastTime = true;
+    Boolean didDispatchPortLastTime = true;//上一次处理过dispatch到main_queue的block
     int32_t retVal = 0;
     do {
 #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
@@ -2434,9 +2434,9 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         if (MACH_PORT_NULL != dispatchPort && !didDispatchPortLastTime) {//优先分发消息
 #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
             msg = (mach_msg_header_t *)msg_buffer;
-            // 接收 dispatchPort 端口的消息 dispatchPort 是消息分发接口
+            // 接收 dispatchPort 端口的消息
             if (__CFRunLoopServiceMachPort(dispatchPort, &msg, sizeof(msg_buffer), &livePort, 0, &voucherState, NULL)) {//如果接收消息成功
-                goto handle_msg;
+                goto handle_msg;//如果有dispatch到main_queue的block
             }
 #elif DEPLOYMENT_TARGET_WINDOWS
             if (__CFRunLoopWaitForMultipleObjects(NULL, &dispatchPort, 0, 0, &livePort, NULL)) {
@@ -2454,7 +2454,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         // Must push the local-to-this-activation ports in on every loop
         // iteration, as this mode could be run re-entrantly and we don't
         // want these ports to get serviced.
-        //将dispatchPort 插入等待端口set
+        //将dispatchPort 插入等待端口set 使dispatch到main_queue的block 也可以唤醒runloop
         __CFPortSetInsert(dispatchPort, waitSet);
         
 	__CFRunLoopModeUnlock(rlm);
@@ -2579,7 +2579,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 #if USE_DISPATCH_SOURCE_FOR_TIMERS
         else if (modeQueuePort != MACH_PORT_NULL && livePort == modeQueuePort) {//timer类型之一
             CFRUNLOOP_WAKEUP_FOR_TIMER();
-            if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {
+            if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {//如果没有执行任何一个timer 则需要重新安排下次唤醒
                 // Re-arm the next timer, because we apparently fired early
                 __CFArmNextTimerInMode(rlm, rl);
             }
@@ -2590,13 +2590,13 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             CFRUNLOOP_WAKEUP_FOR_TIMER();
             // On Windows, we have observed an issue where the timer port is set before the time which we requested it to be set. For example, we set the fire time to be TSR 167646765860, but it is actually observed firing at TSR 167646764145, which is 1715 ticks early. The result is that, when __CFRunLoopDoTimers checks to see if any of the run loop timers should be firing, it appears to be 'too early' for the next timer, and no timers are handled.
             // In this case, the timer port has been automatically reset (since it was returned from MsgWaitForMultipleObjectsEx), and if we do not re-arm it, then no timers will ever be serviced again unless something adjusts the timer list (e.g. adding or removing timers). The fix for the issue is to reset the timer here if CFRunLoopDoTimers did not handle a timer itself. 9308754
-            if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {
+            if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {//如果没有执行任何一个timer 则需要重新安排下次唤醒
                 // Re-arm the next timer
                 __CFArmNextTimerInMode(rlm, rl);
             }
         }
 #endif
-        else if (livePort == dispatchPort) {//如果是分发消息端口
+        else if (livePort == dispatchPort) {// 如果有dispatch到main_queue的block，执行block
             CFRUNLOOP_WAKEUP_FOR_DISPATCH();
             __CFRunLoopModeUnlock(rlm);
             __CFRunLoopUnlock(rl);
@@ -2609,8 +2609,8 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             __CFRunLoopLock(rl);
             __CFRunLoopModeLock(rlm);
             sourceHandledThisLoop = true;
-            didDispatchPortLastTime = true;
-        } else {//source1唤醒
+            didDispatchPortLastTime = true;//上一次处理过dispatch到main_queue的block
+        } else {//source1唤醒 基于端口的消息
             CFRUNLOOP_WAKEUP_FOR_SOURCE();
             
             // If we received a voucher from this mach_msg, then put a copy of the new voucher into TSD. CFMachPortBoost will look in the TSD for the voucher. By using the value in the TSD we tie the CFMachPortBoost to this received mach_msg explicitly without a chance for anything in between the two pieces of code to set the voucher again.
@@ -2642,17 +2642,17 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 	__CFRunLoopDoBlocks(rl, rlm);
         
 
-	if (sourceHandledThisLoop && stopAfterHandle) {
+	if (sourceHandledThisLoop && stopAfterHandle) {//处理完就返回
 	    retVal = kCFRunLoopRunHandledSource;
-    } else if (timeout_context->termTSR < mach_absolute_time()) {
+    } else if (timeout_context->termTSR < mach_absolute_time()) {//超时
             retVal = kCFRunLoopRunTimedOut;
-	} else if (__CFRunLoopIsStopped(rl)) {
+	} else if (__CFRunLoopIsStopped(rl)) {//被其他地方干掉了
             __CFRunLoopUnsetStopped(rl);
 	    retVal = kCFRunLoopRunStopped;
-	} else if (rlm->_stopped) {
+	} else if (rlm->_stopped) {//被其他地方干掉了
 	    rlm->_stopped = false;
 	    retVal = kCFRunLoopRunStopped;
-	} else if (__CFRunLoopModeIsEmpty(rl, rlm, previousMode)) {
+	} else if (__CFRunLoopModeIsEmpty(rl, rlm, previousMode)) {//rlm空了 source/timer/observer一个都没有了
 	    retVal = kCFRunLoopRunFinished;
 	}
         
